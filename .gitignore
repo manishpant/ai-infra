@@ -1,0 +1,20 @@
+.env
+fmt_errors.txt
+tf_files.txt
+
+# Keep repo metadata out
+.git/
+
+# Ignore generated artifacts
+docs/generated/
+
+# Ignore non-PoC scripts by default
+scripts/
+!scripts/claude_heal.py
+!scripts/fmt_error_parser.py
+!scripts/git_commit_helper.sh
+!scripts/install_precommit_hook.sh
+
+# Ignore local hook installation target
+.git/hooks/
+.githooks/

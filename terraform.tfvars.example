@@ -1,0 +1,30 @@
+# Copy this file to terraform.tfvars and update values.
+
+aws_region    = "us-east-1"
+environment   = "dev"
+project_name  = "s3-demo"
+bucket_name   = "replace-with-globally-unique-bucket-name"
+
+enable_versioning             = true
+enable_mfa_delete             = false
+enable_server_side_encryption = true
+enable_public_access_block    = true
+enable_logging                = false
+log_bucket_name               = ""
+
+lifecycle_rules = [
+  {
+    id                 = "expire-logs"
+    enabled            = false
+    prefix             = "logs/"
+    expiration_days    = 90
+    transition_days    = 30
+    transition_storage = "STANDARD_IA"
+  }
+]
+
+tags = {
+  Owner       = "platform-team"
+  CostCenter  = "infra"
+  Application = "s3-demo"
+}

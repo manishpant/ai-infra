@@ -1,0 +1,79 @@
+name: Terraform Self-Heal Fmt Only
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  terraform-format-heal:
+    runs-on: ubuntu-latest
+    permissions: write-all
+      # contents: write
+      # pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: latest
+
+      - name: Run terraform fmt --check (initial)
+        id: fmt_check_initial
+        run: |
+          terraform fmt --check --recursive . > /tmp/fmt_output.txt 2>&1 || true
+          echo "status=$?" >> $GITHUB_OUTPUT
+          cat /tmp/fmt_output.txt
+        continue-on-error: true
+
+      - name: Capture fmt errors and affected files
+        id: fmt_context
+        if: steps.fmt_check_initial.outputs.status != '0'
+        run: |
+          python3 scripts/fmt_error_parser.py \
+            --terraform-dir . \
+            --output /tmp/fmt_context.json
+
+      - name: Call Claude for auto-heal
+        id: claude_heal
+        if: steps.fmt_check_initial.outputs.status != '0'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 scripts/claude_heal.py \
+            --context-file /tmp/fmt_context.json \
+            --output-dir . \
+            --max-retries 1
+
+      - name: Re-run terraform fmt --check
+        id: fmt_check_final
+        run: |
+          terraform fmt --check --recursive . > /tmp/fmt_final.txt 2>&1 || true
+          echo "status=$?" >> $GITHUB_OUTPUT
+          cat /tmp/fmt_final.txt
+
+      - name: Auto-commit healed changes
+        id: auto_commit
+        if: |
+          steps.fmt_check_initial.outputs.status != '0' && 
+          steps.fmt_check_final.outputs.status == '0'
+        run: |
+          bash scripts/git_commit_helper.sh "[AUTO-HEAL] Fix Terraform formatting"
+
+      - name: Fail on persistent fmt errors
+        if: steps.fmt_check_final.outputs.status != '0'
+        run: |
+          echo "::error::Terraform fmt failed after auto-heal attempt. Manual intervention required."
+          exit 1
+
+      - name: Success notification
+        if: steps.fmt_check_final.outputs.status == '0'
+        run: |
+          echo "✓ Terraform formatting validated successfully"
