@@ -32,17 +32,23 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: latest
+          # Avoid the wrapper that prints "Terraform exited with code 3" as an alarming Error line;
+          # `fmt --check` exit 3 only means "files need formatting" — expected on the probe step.
+          terraform_wrapper: false
 
       # Exit 0 so this step stays green: drift is expected here, not a "failure".
       # Downstream steps use steps.fmt_check_initial.outputs.status (0 = clean, non-zero = needs heal).
       - name: Run terraform fmt --check (initial probe)
         id: fmt_check_initial
         run: |
+          echo "=== Phase 1/3: format probe (non-zero exit here only means drift; this step always succeeds) ==="
+          echo "Terraform fmt exit codes: 0 = already formatted, non-zero (often 3) = one or more .tf files need formatting."
           set +e
           terraform fmt --check --recursive . > /tmp/fmt_output.txt 2>&1
           fmt_status=$?
           echo "status=$fmt_status" >> $GITHUB_OUTPUT
           set -e
+          echo "Recorded status=$fmt_status for later steps."
           cat /tmp/fmt_output.txt
           exit 0
 
@@ -50,6 +56,7 @@ jobs:
         id: fmt_context
         if: steps.fmt_check_initial.outputs.status != '0'
         run: |
+          echo "=== Phase 2a: snapshot .tf contents for Claude (fmt_error_parser) ==="
           python3 scripts/fmt_error_parser.py \
             --terraform-dir . \
             --output /tmp/fmt_context.json
@@ -64,6 +71,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          echo "=== Phase 2b: call Claude and write reformatted .tf files ==="
           python3 scripts/claude_heal.py \
             --context-file /tmp/fmt_context.json \
             --output-dir . \
@@ -73,12 +81,17 @@ jobs:
       - name: Re-run terraform fmt --check
         id: fmt_check_final
         run: |
+          echo "=== Phase 3/3: format gate after heal (this step must exit 0 or the job fails) ==="
           set +e
           terraform fmt --check --recursive . > /tmp/fmt_final.txt 2>&1
           fmt_status=$?
           echo "status=$fmt_status" >> $GITHUB_OUTPUT
           set -e
           cat /tmp/fmt_final.txt
+          if [[ "$fmt_status" -ne 0 ]]; then
+            echo "::error::terraform fmt --check still failing after heal (exit $fmt_status). See log above."
+            exit "$fmt_status"
+          fi
 
       - name: Open PR with healed formatting (push only)
         id: open_pr
@@ -99,12 +112,6 @@ jobs:
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: bash scripts/publish_auto_heal.sh
-
-      - name: Fail on persistent fmt errors
-        if: steps.fmt_check_final.outputs.status != '0'
-        run: |
-          echo "::error::Terraform fmt failed after auto-heal attempt. Manual intervention required."
-          exit 1
 
       - name: Log outcome
         if: steps.fmt_check_final.outputs.status == '0'
