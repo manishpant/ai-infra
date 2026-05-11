@@ -8,12 +8,14 @@ tf_files.txt
 # Ignore generated artifacts
 docs/generated/
 
-# Ignore non-PoC scripts by default
-scripts/
+# Ignore non-PoC scripts by default (use scripts/* so new allowlisted files stay addable)
+scripts/*
 !scripts/claude_heal.py
 !scripts/fmt_error_parser.py
 !scripts/git_commit_helper.sh
 !scripts/install_precommit_hook.sh
+!scripts/publish_auto_heal.sh
+!scripts/write_job_summary.sh
 
 # Ignore local hook installation target
 .git/hooks/

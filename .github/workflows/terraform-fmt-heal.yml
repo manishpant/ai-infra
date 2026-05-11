@@ -1,7 +1,7 @@
 name: Terraform Self-Heal Fmt Only
 
 'on':
-  # All branches (e.g. poc/autoheal); ** matches names with slashes. Was main/develop only.
+  # All branches (e.g. poc/autoheal); ** matches names with slashes.
   push:
     branches:
       - '**'
@@ -10,15 +10,20 @@ name: Terraform Self-Heal Fmt Only
 jobs:
   terraform-format-heal:
     runs-on: ubuntu-latest
+    # Avoid loops and noise when the bot pushes heal branches.
+    if: |
+      (github.event_name == 'push' && !startsWith(github.ref_name, 'terraform-fmt-auto-heal/')) ||
+      (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'terraform-fmt-auto-heal/'))
     permissions: write-all
       # contents: write
       # pull-requests: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ github.token }}
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
@@ -57,7 +62,8 @@ jobs:
           python3 scripts/claude_heal.py \
             --context-file /tmp/fmt_context.json \
             --output-dir . \
-            --max-retries 1
+            --max-retries 2 \
+            --report /tmp/claude_heal_report.json
 
       - name: Re-run terraform fmt --check
         id: fmt_check_final
@@ -69,13 +75,21 @@ jobs:
           set -e
           cat /tmp/fmt_final.txt
 
-      - name: Auto-commit healed changes
-        id: auto_commit
+      - name: Open PR with healed formatting (push only)
+        id: open_pr
         if: |
-          steps.fmt_check_initial.outputs.status != '0' && 
-          steps.fmt_check_final.outputs.status == '0'
-        run: |
-          bash scripts/git_commit_helper.sh "[AUTO-HEAL] Fix Terraform formatting"
+          steps.fmt_check_initial.outputs.status != '0' &&
+          steps.fmt_check_final.outputs.status == '0' &&
+          github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          HEAL_BRANCH: terraform-fmt-auto-heal/run-${{ github.run_id }}-${{ github.run_attempt }}
+          COMMIT_MSG: '[AUTO-HEAL] Fix Terraform formatting'
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: bash scripts/publish_auto_heal.sh
 
       - name: Fail on persistent fmt errors
         if: steps.fmt_check_final.outputs.status != '0'
@@ -83,7 +97,26 @@ jobs:
           echo "::error::Terraform fmt failed after auto-heal attempt. Manual intervention required."
           exit 1
 
-      - name: Success notification
+      - name: Log outcome
         if: steps.fmt_check_final.outputs.status == '0'
         run: |
-          echo "✓ Terraform formatting validated successfully"
+          echo "✓ terraform fmt --check passed."
+          if [[ "${{ steps.fmt_check_initial.outputs.status }}" == "0" ]]; then
+            echo "No formatting drift; Claude was not invoked."
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "Formatting was fixed on a dedicated branch (push). Open the Summary tab on this run for fmt output, Claude report JSON, and the PR link."
+          else
+            echo "Formatting was fixed after auto-heal. Open the Summary tab for details (PRs are not auto-opened on pull_request events)."
+          fi
+
+      - name: Persist metadata for job summary
+        if: always()
+        run: |
+          echo '${{ steps.fmt_check_initial.outputs.status }}' > /tmp/meta_fmt_initial.txt
+          echo '${{ steps.fmt_check_final.outputs.status }}' > /tmp/meta_fmt_final.txt
+          echo '${{ steps.claude_heal.outcome }}' > /tmp/meta_claude_outcome.txt
+          echo '${{ steps.open_pr.outcome }}' > /tmp/meta_open_pr_outcome.txt
+
+      - name: Write job summary
+        if: always()
+        run: bash scripts/write_job_summary.sh
