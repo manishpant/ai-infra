@@ -41,12 +41,17 @@ pr_body_file=/tmp/auto_heal_pr_body.md
   echo "- **Workflow run:** ${RUN_URL}"
   if [[ -f /tmp/claude_heal_report.json ]]; then
     echo
-    echo "### Claude heal report (machine-readable)"
+    if jq -e '.human_summary' /tmp/claude_heal_report.json >/dev/null 2>&1; then
+      jq -r '.human_summary' /tmp/claude_heal_report.json
+      echo
+    fi
+    echo "<details><summary>Technical report (JSON)</summary>"
     echo
     echo '```json'
-    cat /tmp/claude_heal_report.json
+    head -c 12000 /tmp/claude_heal_report.json || true
     echo
     echo '```'
+    echo "</details>"
   fi
   if [[ -f /tmp/fmt_output.txt ]]; then
     echo

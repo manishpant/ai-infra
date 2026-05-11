@@ -121,27 +121,133 @@ def apply_fixes(claude_response: str) -> tuple[bool, list[str]]:
         return False, touched
 
 
+def _snippet(text: str, max_len: int = 500) -> str:
+    t = text.strip().replace("\r\n", "\n")
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 3] + "..."
+
+
+def build_human_summary(
+    *,
+    status: str,
+    model: str,
+    files_modified: list[str],
+    files_considered: list[str],
+    used_context_file: bool,
+    fmt_errors_excerpt: list[str],
+    notes: str | None,
+) -> str:
+    """Short markdown for PR bodies and GitHub Actions job summaries."""
+    lines: list[str] = []
+    lines.append("### What Claude did (plain language)")
+    lines.append("")
+
+    if status == "success":
+        lines.append(
+            "Terraform reported that at least one `.tf` file was not `terraform fmt`-clean. "
+            "Claude was asked to return **only** formatting fixes (indentation, spacing, line breaks). "
+            "Those versions were written back to the paths below."
+        )
+        lines.append("")
+        lines.append(f"- **Model:** `{model}`")
+        lines.append(f"- **Files updated on disk:** {len(files_modified)}")
+        for p in sorted(files_modified):
+            lines.append(f"  - `{p}`")
+        if used_context_file:
+            lines.append("- **How files were chosen:** from the fmt context snapshot (same scope as `fmt_error_parser`).")
+        else:
+            lines.append("- **How files were chosen:** from `terraform fmt --check` stdout (file list).")
+        if fmt_errors_excerpt:
+            ex0 = _snippet(fmt_errors_excerpt[0], 500)
+            one_line = " ".join(ex0.split())
+            lines.append(
+                f"- **What `terraform fmt` reported (short excerpt):** {one_line}"
+                + ("…" if len(one_line) >= 500 else "")
+            )
+
+    elif status == "no_changes_needed":
+        lines.append("No formatting drift was found after `terraform fmt --check`, so Claude was not called.")
+        lines.append("")
+        lines.append(f"- **Model (would be used):** `{model}`")
+
+    elif status == "error":
+        lines.append("The heal step could not run because no file contents were available to send to Claude.")
+        lines.append("")
+        if files_considered:
+            lines.append(f"- **Paths in context:** {', '.join(f'`{p}`' for p in sorted(files_considered))}")
+        if notes:
+            lines.append(f"- **Detail:** {notes}")
+
+    elif status == "api_error":
+        lines.append("Claude’s API did not return a usable answer (auth, rate limit, network, or model error).")
+        lines.append("")
+        lines.append(f"- **Model:** `{model}`")
+        lines.append(f"- **Files we intended to send:** {len(files_considered)}")
+        for p in sorted(files_considered)[:20]:
+            lines.append(f"  - `{p}`")
+        if len(files_considered) > 20:
+            lines.append("  - _(more omitted)_")
+        if notes:
+            lines.append(f"- **Error (from client):** {_snippet(notes, 600)}")
+
+    elif status == "apply_failed":
+        lines.append(
+            "Claude responded, but the workflow could not apply the fix. "
+            "Usually the reply was not valid JSON, did not include a `files` map, or a file could not be written."
+        )
+        lines.append("")
+        lines.append(f"- **Model:** `{model}`")
+        if files_modified:
+            lines.append(f"- **Partially written before failure:** {', '.join(f'`{p}`' for p in sorted(files_modified))}")
+        if notes:
+            lines.append(f"- **Detail:** {_snippet(notes, 500)}")
+
+    else:
+        lines.append(f"Status: `{status}`. See JSON report for fields.")
+        if notes:
+            lines.append(f"- **Note:** {_snippet(notes, 500)}")
+
+    return "\n".join(lines)
+
+
 def write_report(
     path: str,
     *,
     status: str,
     model: str,
     files_modified: list[str],
+    files_considered: list[str],
     used_context_file: bool,
     fmt_errors_excerpt: list[str],
     notes: str | None = None,
 ) -> None:
+    human = build_human_summary(
+        status=status,
+        model=model,
+        files_modified=files_modified,
+        files_considered=files_considered,
+        used_context_file=used_context_file,
+        fmt_errors_excerpt=fmt_errors_excerpt,
+        notes=notes,
+    )
     report = {
         "status": status,
         "model": model,
         "files_modified": files_modified,
+        "files_considered": files_considered,
         "used_context_file": used_context_file,
         "fmt_errors_excerpt": fmt_errors_excerpt[:3],
         "notes": notes,
+        "human_summary": human,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"Wrote heal report to {path}")
+    summary_md = path.replace(".json", "") + "_summary.md"
+    with open(summary_md, "w", encoding="utf-8") as f:
+        f.write(human)
+    print(f"Wrote human summary to {summary_md}")
 
 
 def main() -> int:
@@ -176,6 +282,7 @@ def main() -> int:
                 status="no_changes_needed",
                 model=model,
                 files_modified=[],
+                files_considered=[],
                 used_context_file=False,
                 fmt_errors_excerpt=[],
                 notes="terraform fmt --check reported no files to fix.",
@@ -193,6 +300,7 @@ def main() -> int:
             status="error",
             model=model,
             files_modified=[],
+            files_considered=[],
             used_context_file=used_context,
             fmt_errors_excerpt=fmt_excerpt,
             notes="No file contents available to send to Claude.",
@@ -221,6 +329,7 @@ def main() -> int:
                     status="api_error",
                     model=model,
                     files_modified=[],
+                    files_considered=sorted(files_content.keys()),
                     used_context_file=used_context,
                     fmt_errors_excerpt=fmt_excerpt,
                     notes=last_err,
@@ -235,6 +344,7 @@ def main() -> int:
             status="success",
             model=model,
             files_modified=touched,
+            files_considered=sorted(files_content.keys()),
             used_context_file=used_context,
             fmt_errors_excerpt=fmt_excerpt,
             notes="Claude returned JSON with file bodies; writes applied to working tree.",
@@ -247,6 +357,7 @@ def main() -> int:
         status="apply_failed",
         model=model,
         files_modified=touched,
+        files_considered=sorted(files_content.keys()),
         used_context_file=used_context,
         fmt_errors_excerpt=fmt_excerpt,
         notes="Could not parse JSON from Claude or writes failed.",

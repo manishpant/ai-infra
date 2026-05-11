@@ -53,10 +53,18 @@ md_escape() {
 
   echo "### Claude heal"
   if [[ -f /tmp/claude_heal_report.json ]]; then
-    echo "<details><summary>Report JSON</summary>"
+    if jq -e '.human_summary' /tmp/claude_heal_report.json >/dev/null 2>&1; then
+      jq -r '.human_summary' /tmp/claude_heal_report.json
+      echo
+    else
+      echo "_No human_summary in report (older claude_heal); showing status line only._"
+      echo "- **status:** \`$(jq -r '.status // "unknown"' /tmp/claude_heal_report.json)\` · **model:** \`$(jq -r '.model // "unknown"' /tmp/claude_heal_report.json)\`"
+      echo
+    fi
+    echo "<details><summary>Technical report (JSON)</summary>"
     echo
     echo '```json'
-    cat /tmp/claude_heal_report.json
+    head -c 12000 /tmp/claude_heal_report.json || true
     echo
     echo '```'
     echo "</details>"

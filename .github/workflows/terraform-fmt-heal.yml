@@ -33,7 +33,9 @@ jobs:
         with:
           terraform_version: latest
 
-      - name: Run terraform fmt --check (initial)
+      # Exit 0 so this step stays green: drift is expected here, not a "failure".
+      # Downstream steps use steps.fmt_check_initial.outputs.status (0 = clean, non-zero = needs heal).
+      - name: Run terraform fmt --check (initial probe)
         id: fmt_check_initial
         run: |
           set +e
@@ -42,7 +44,7 @@ jobs:
           echo "status=$fmt_status" >> $GITHUB_OUTPUT
           set -e
           cat /tmp/fmt_output.txt
-        continue-on-error: true
+          exit 0
 
       - name: Capture fmt errors and affected files
         id: fmt_context
