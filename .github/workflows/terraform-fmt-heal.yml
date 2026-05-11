@@ -36,10 +36,12 @@ jobs:
           # `fmt --check` exit 3 only means "files need formatting" — expected on the probe step.
           terraform_wrapper: false
 
-      # Exit 0 so this step stays green: drift is expected here, not a "failure".
+      # Always exit 0 so this step never marks the job red; drift is recorded in outputs only.
+      # continue-on-error is a backup if anything in the script returned non-zero before exit 0.
       # Downstream steps use steps.fmt_check_initial.outputs.status (0 = clean, non-zero = needs heal).
       - name: Run terraform fmt --check (initial probe)
         id: fmt_check_initial
+        continue-on-error: true
         run: |
           echo "=== Phase 1/3: format probe (non-zero exit here only means drift; this step always succeeds) ==="
           echo "Terraform fmt exit codes: 0 = already formatted, non-zero (often 3) = one or more .tf files need formatting."
@@ -78,20 +80,26 @@ jobs:
             --max-retries 2 \
             --report /tmp/claude_heal_report.json
 
-      - name: Re-run terraform fmt --check
+      # Same as probe: never fail this step — Terraform's non-zero exit is normal when drift remains.
+      # The dedicated "Fmt gate" step below fails the job so the red X is on a clearly named step.
+      - name: Re-run terraform fmt --check (after heal)
         id: fmt_check_final
+        continue-on-error: true
         run: |
-          echo "=== Phase 3/3: format gate after heal (this step must exit 0 or the job fails) ==="
+          echo "=== Phase 3/3: re-check formatting (log only; gate step enforces success) ==="
           set +e
           terraform fmt --check --recursive . > /tmp/fmt_final.txt 2>&1
           fmt_status=$?
           echo "status=$fmt_status" >> $GITHUB_OUTPUT
           set -e
           cat /tmp/fmt_final.txt
-          if [[ "$fmt_status" -ne 0 ]]; then
-            echo "::error::terraform fmt --check still failing after heal (exit $fmt_status). See log above."
-            exit "$fmt_status"
-          fi
+          exit 0
+
+      - name: Fmt gate — fail job if still not formatted after heal
+        if: steps.fmt_check_final.outputs.status != '0'
+        run: |
+          echo "::error::terraform fmt --check still failing after heal (exit code ${{ steps.fmt_check_final.outputs.status }}). Fix formatting locally or check Claude/API logs."
+          exit 1
 
       - name: Open PR with healed formatting (push only)
         id: open_pr
