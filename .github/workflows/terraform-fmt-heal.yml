@@ -44,6 +44,10 @@ jobs:
             --terraform-dir . \
             --output /tmp/fmt_context.json
 
+      - name: Install Python dependencies (Anthropic SDK)
+        if: steps.fmt_check_initial.outputs.status != '0'
+        run: python3 -m pip install --disable-pip-version-check 'anthropic>=0.40.0'
+
       - name: Call Claude for auto-heal
         id: claude_heal
         if: steps.fmt_check_initial.outputs.status != '0'
