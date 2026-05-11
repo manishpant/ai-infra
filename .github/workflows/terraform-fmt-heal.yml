@@ -7,12 +7,11 @@ name: Terraform Self-Heal Fmt Only
   pull_request:
 
 jobs:
-  # Job 1: probe only — fails when drift exists (red check) + Summary with full fmt output.
-  # continue-on-error: so a successful Job 2 still marks the overall workflow green.
+  # Job 1: probe fails (red) when drift exists; emit (always) still writes outputs for Job 2.
+  # Do not use continue-on-error here — you want a real failed check when fmt is dirty.
   terraform-fmt-detect:
     name: Terraform fmt detect
     runs-on: ubuntu-latest
-    continue-on-error: true
     if: |
       (github.event_name == 'push' && !startsWith(github.ref_name, 'terraform-fmt-auto-heal/')) ||
       (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'terraform-fmt-auto-heal/'))
@@ -60,6 +59,8 @@ jobs:
 
           {
             echo "## Job 1 — Terraform fmt detect"
+            echo ""
+            echo "_When drift exists, **this job is intentionally failed** (red) on the probe step. Job 2 may still run and fix formatting; the workflow can remain red until you merge or push a clean commit — that is normal._"
             echo ""
             echo "| Field | Value |"
             echo "| --- | --- |"
