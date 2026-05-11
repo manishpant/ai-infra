@@ -1,22 +1,87 @@
 name: Terraform Self-Heal Fmt Only
 
 'on':
-  # All branches (e.g. poc/autoheal); ** matches names with slashes.
   push:
     branches:
       - '**'
   pull_request:
 
 jobs:
-  terraform-format-heal:
+  # Job 1: probe only — fails when drift exists (red check) + Summary with full fmt output.
+  # continue-on-error: so a successful Job 2 still marks the overall workflow green.
+  terraform-fmt-detect:
+    name: Terraform fmt detect
     runs-on: ubuntu-latest
-    # Avoid loops and noise when the bot pushes heal branches.
+    continue-on-error: true
     if: |
       (github.event_name == 'push' && !startsWith(github.ref_name, 'terraform-fmt-auto-heal/')) ||
       (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'terraform-fmt-auto-heal/'))
-    # contents + pull-requests: required for push + gh pr create.
-    # If PR creation still fails, enable in repo Settings → Actions → General:
-    # "Allow GitHub Actions to create and approve pull requests", or set ACTIONS_PR_CREATE_TOKEN.
+    permissions:
+      contents: read
+    outputs:
+      needs_format: ${{ steps.emit.outputs.needs_format }}
+      fmt_status: ${{ steps.emit.outputs.fmt_status }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: latest
+          terraform_wrapper: false
+
+      - name: terraform fmt --check (detect drift)
+        id: probe
+        run: |
+          set +e
+          terraform fmt --check --recursive . > /tmp/fmt_output.txt 2>&1
+          fmt_status=$?
+          echo "$fmt_status" > /tmp/fmt_status.txt
+          set -e
+          echo "terraform fmt --check exit code: $fmt_status (0 = clean, non-zero = drift)"
+          cat /tmp/fmt_output.txt
+          exit "$fmt_status"
+
+      - name: Record outputs + detect job summary
+        id: emit
+        if: always()
+        run: |
+          fmt_status="$(cat /tmp/fmt_status.txt 2>/dev/null || echo 0)"
+          if [[ "$fmt_status" != "0" ]]; then
+            echo "needs_format=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_format=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "status=$fmt_status" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Job 1 — Terraform fmt detect"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            if [[ "$fmt_status" -ne 0 ]]; then drift_cell="**yes**"; next_cell="**Job 2 — Terraform fmt heal** runs (Claude + optional PR/merge)."; else drift_cell="**no**"; next_cell="Heal job skipped — branch is fmt-clean."; fi
+            echo "| Drift detected | ${drift_cell} |"
+            echo "| Exit code | \`${fmt_status}\` |"
+            echo "| Next | ${next_cell} |"
+            echo ""
+            echo "<details><summary>Full \`terraform fmt --check\` output</summary>"
+            echo ""
+            echo '```text'
+            cat /tmp/fmt_output.txt 2>/dev/null || echo "(no output file)"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Job 2: only when Job 1 saw drift — Claude, re-check, PR/merge, full summary.
+  terraform-fmt-heal:
+    name: Terraform fmt heal (Claude)
+    runs-on: ubuntu-latest
+    needs: terraform-fmt-detect
+    if: always() && needs.terraform-fmt-detect.outputs.needs_format == 'true'
     permissions:
       contents: write
       pull-requests: write
@@ -32,65 +97,46 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: latest
-          # Avoid the wrapper that prints "Terraform exited with code 3" as an alarming Error line;
-          # `fmt --check` exit 3 only means "files need formatting" — expected on the probe step.
           terraform_wrapper: false
 
-      # Always exit 0 so this step never marks the job red; drift is recorded in outputs only.
-      # continue-on-error is a backup if anything in the script returned non-zero before exit 0.
-      # Downstream steps use steps.fmt_check_initial.outputs.status (0 = clean, non-zero = needs heal).
-      - name: Run terraform fmt --check (initial probe)
+      - name: Recreate initial fmt log for summary scripts
         id: fmt_check_initial
-        continue-on-error: true
         run: |
-          echo "=== Phase 1/3: format probe (non-zero exit here only means drift; this step always succeeds) ==="
-          echo "Terraform fmt exit codes: 0 = already formatted, non-zero (often 3) = one or more .tf files need formatting."
           set +e
           terraform fmt --check --recursive . > /tmp/fmt_output.txt 2>&1
           fmt_status=$?
-          echo "status=$fmt_status" >> $GITHUB_OUTPUT
-          set -e
-          echo "Recorded status=$fmt_status for later steps."
-          cat /tmp/fmt_output.txt
+          echo "status=$fmt_status" >> "$GITHUB_OUTPUT"
           exit 0
 
       - name: Capture fmt errors and affected files
         id: fmt_context
-        if: steps.fmt_check_initial.outputs.status != '0'
         run: |
-          echo "=== Phase 2a: snapshot .tf contents for Claude (fmt_error_parser) ==="
           python3 scripts/fmt_error_parser.py \
             --terraform-dir . \
             --output /tmp/fmt_context.json
 
       - name: Install Python dependencies (Anthropic SDK)
-        if: steps.fmt_check_initial.outputs.status != '0'
         run: python3 -m pip install --disable-pip-version-check 'anthropic>=0.40.0'
 
       - name: Call Claude for auto-heal
         id: claude_heal
-        if: steps.fmt_check_initial.outputs.status != '0'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          echo "=== Phase 2b: call Claude and write reformatted .tf files ==="
           python3 scripts/claude_heal.py \
             --context-file /tmp/fmt_context.json \
             --output-dir . \
             --max-retries 2 \
             --report /tmp/claude_heal_report.json
 
-      # Same as probe: never fail this step — Terraform's non-zero exit is normal when drift remains.
-      # The dedicated "Fmt gate" step below fails the job so the red X is on a clearly named step.
       - name: Re-run terraform fmt --check (after heal)
         id: fmt_check_final
         continue-on-error: true
         run: |
-          echo "=== Phase 3/3: re-check formatting (log only; gate step enforces success) ==="
           set +e
           terraform fmt --check --recursive . > /tmp/fmt_final.txt 2>&1
           fmt_status=$?
-          echo "status=$fmt_status" >> $GITHUB_OUTPUT
+          echo "status=$fmt_status" >> "$GITHUB_OUTPUT"
           set -e
           cat /tmp/fmt_final.txt
           exit 0
@@ -98,20 +144,16 @@ jobs:
       - name: Fmt gate — fail job if still not formatted after heal
         if: steps.fmt_check_final.outputs.status != '0'
         run: |
-          echo "::error::terraform fmt --check still failing after heal (exit code ${{ steps.fmt_check_final.outputs.status }}). Fix formatting locally or check Claude/API logs."
+          echo "::error::terraform fmt --check still failing after heal (exit code ${{ steps.fmt_check_final.outputs.status }})."
           exit 1
 
       - name: Open PR with healed formatting (push only)
         id: open_pr
         if: |
-          steps.fmt_check_initial.outputs.status != '0' &&
           steps.fmt_check_final.outputs.status == '0' &&
           github.event_name == 'push'
         env:
-          # Optional fine-grained/classic PAT with repo + pull-requests (if org blocks token PR creation).
           GH_TOKEN: ${{ secrets.ACTIONS_PR_CREATE_TOKEN || github.token }}
-          # After opening the heal PR, squash-merge into BASE_BRANCH so engineers do not merge by hand.
-          # Set repository variable AUTO_MERGE_HEAL_PR to false to disable. If merge fails (branch rules), merge the PR from the UI.
           AUTO_MERGE_HEAL_PR: ${{ vars.AUTO_MERGE_HEAL_PR != '' && vars.AUTO_MERGE_HEAL_PR || 'true' }}
           BASE_BRANCH: ${{ github.ref_name }}
           HEAL_BRANCH: terraform-fmt-auto-heal/run-${{ github.run_id }}-${{ github.run_attempt }}
@@ -124,23 +166,28 @@ jobs:
       - name: Log outcome
         if: steps.fmt_check_final.outputs.status == '0'
         run: |
-          echo "✓ terraform fmt --check passed."
-          if [[ "${{ steps.fmt_check_initial.outputs.status }}" == "0" ]]; then
-            echo "No formatting drift; Claude was not invoked."
-          elif [[ "${{ github.event_name }}" == "push" ]]; then
-            echo "Formatting was fixed on a dedicated branch (push). Open the Summary tab on this run for fmt output, Claude report JSON, and the PR link."
+          echo "✓ terraform fmt --check passed after heal."
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "See Job 2 Summary for PR / merge and Claude details."
           else
-            echo "Formatting was fixed after auto-heal. Open the Summary tab for details (PRs are not auto-opened on pull_request events)."
+            echo "See Job 2 Summary (no auto-PR on pull_request)."
           fi
 
       - name: Persist metadata for job summary
         if: always()
         run: |
-          echo '${{ steps.fmt_check_initial.outputs.status }}' > /tmp/meta_fmt_initial.txt
+          echo '${{ needs.terraform-fmt-detect.outputs.fmt_status }}' > /tmp/meta_fmt_initial.txt
           echo '${{ steps.fmt_check_final.outputs.status }}' > /tmp/meta_fmt_final.txt
           echo '${{ steps.claude_heal.outcome }}' > /tmp/meta_claude_outcome.txt
           echo '${{ steps.open_pr.outcome }}' > /tmp/meta_open_pr_outcome.txt
 
-      - name: Write job summary
+      - name: Write job summary (heal)
         if: always()
-        run: bash scripts/write_job_summary.sh
+        run: |
+          {
+            echo "## Job 2 — Terraform fmt heal"
+            echo ""
+            echo "_Detect job exit code was \`${{ needs.terraform-fmt-detect.outputs.fmt_status }}\` (drift)._"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/write_job_summary.sh
