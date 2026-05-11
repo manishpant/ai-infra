@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Create a branch with healed .tf files, push, and open a PR to BASE_BRANCH.
-# Requires: gh, git, GH_TOKEN (or GITHUB_TOKEN). Env: BASE_BRANCH, HEAL_BRANCH, COMMIT_MSG.
+# Create a branch with healed .tf files, push, open a PR to BASE_BRANCH, then optionally squash-merge
+# so fixes land on BASE_BRANCH without a human merge. Env: AUTO_MERGE_HEAL_PR (default true).
+# Requires: gh, git, GH_TOKEN. Env: BASE_BRANCH, HEAL_BRANCH, COMMIT_MSG.
 
 set -euo pipefail
 
@@ -58,12 +59,50 @@ pr_body_file=/tmp/auto_heal_pr_body.md
   fi
 } >"$pr_body_file"
 
-pr_url="$(gh pr create \
-  --repo "$REPO" \
-  --base "$BASE_BRANCH" \
-  --head "$HEAL_BRANCH" \
-  --title "chore(terraform): auto-heal formatting (run ${GITHUB_RUN_ID:-unknown})" \
-  --body-file "$pr_body_file")"
+manual_pr_url="https://github.com/${REPO}/pull/new/${HEAL_BRANCH}"
 
-echo "$pr_url" >/tmp/pr_url.txt
-echo "Opened pull request: $pr_url"
+set +e
+pr_url="$(
+  gh pr create \
+    --repo "$REPO" \
+    --base "$BASE_BRANCH" \
+    --head "$HEAL_BRANCH" \
+    --title "chore(terraform): auto-heal formatting (run ${GITHUB_RUN_ID:-unknown})" \
+    --body-file "$pr_body_file" 2>/tmp/gh_pr_create.err
+)"
+rc=$?
+set -e
+
+if [[ "$rc" -eq 0 && -n "$pr_url" ]]; then
+  echo "$pr_url" >/tmp/pr_url.txt
+  echo "Opened pull request: $pr_url"
+
+  if [[ "${AUTO_MERGE_HEAL_PR:-true}" == "true" ]]; then
+    set +e
+    gh pr merge "$pr_url" --repo "$REPO" --squash --delete-branch 2>/tmp/gh_pr_merge.err
+    mrc=$?
+    set -e
+    if [[ "$mrc" -eq 0 ]]; then
+      echo "merged" >/tmp/pr_merge_status.txt
+      echo "Squash-merged heal PR and deleted remote branch ${HEAL_BRANCH}."
+    else
+      echo "merge_failed" >/tmp/pr_merge_status.txt
+      cat /tmp/gh_pr_merge.err >&2 || true
+      echo "::warning::Heal PR was opened but could not be merged automatically (branch protection, required reviews, or merge queue). Merge it manually: ${pr_url}"
+    fi
+  else
+    echo "skipped" >/tmp/pr_merge_status.txt
+    echo "AUTO_MERGE_HEAL_PR is false; leaving PR open for manual merge."
+  fi
+  exit 0
+fi
+
+cat /tmp/gh_pr_create.err >&2 || true
+
+if grep -q 'not permitted to create or approve pull requests' /tmp/gh_pr_create.err 2>/dev/null; then
+  echo "$manual_pr_url" >/tmp/pr_url.txt
+  echo "::warning::GitHub blocked automatic PR creation for GITHUB_TOKEN. Enable: Repository Settings → Actions → General → Workflow permissions → allow GitHub Actions to create and approve pull requests (or set secret ACTIONS_PR_CREATE_TOKEN with a PAT that can open PRs). Branch was pushed; open a PR manually: ${manual_pr_url}"
+  exit 0
+fi
+
+exit "$rc"

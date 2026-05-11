@@ -79,14 +79,26 @@ md_escape() {
   fi
   echo
 
-  echo "### Pull request (for engineer review)"
+  echo "### Pull request and merge"
   if [[ -f /tmp/pr_url.txt ]]; then
     url="$(tr -d '[:space:]' </tmp/pr_url.txt)"
     if [[ -n "$url" ]]; then
-      echo "Claude’s fixes were pushed to a dedicated branch and a **PR was opened**:"
-      echo "- **${url}**"
+      merge_status="$(cat /tmp/pr_merge_status.txt 2>/dev/null || echo unknown)"
+      if [[ "$merge_status" == "merged" ]]; then
+        echo "A heal PR was opened and **squash-merged automatically** into your branch (remote heal branch deleted):"
+        echo "- **${url}** (merged)"
+      elif [[ "$merge_status" == "merge_failed" ]]; then
+        echo "A heal PR was **opened but not merged** (branch protection or required checks). Open and merge it manually:"
+        echo "- **${url}**"
+      elif [[ "$merge_status" == "skipped" ]]; then
+        echo "A heal PR was opened (\`AUTO_MERGE_HEAL_PR\` disabled). Merge when ready:"
+        echo "- **${url}**"
+      else
+        echo "Heal branch / PR link:"
+        echo "- **${url}**"
+      fi
       echo
-      echo "Use the PR **Files changed** tab to see the full diff. The PR body includes the workflow link and Claude report JSON."
+      echo "Use the PR **Files changed** tab for the full diff when the PR is still open."
     else
       echo "_PR URL file was empty._"
     fi

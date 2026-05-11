@@ -14,9 +14,12 @@ jobs:
     if: |
       (github.event_name == 'push' && !startsWith(github.ref_name, 'terraform-fmt-auto-heal/')) ||
       (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'terraform-fmt-auto-heal/'))
-    permissions: write-all
-      # contents: write
-      # pull-requests: write
+    # contents + pull-requests: required for push + gh pr create.
+    # If PR creation still fails, enable in repo Settings → Actions → General:
+    # "Allow GitHub Actions to create and approve pull requests", or set ACTIONS_PR_CREATE_TOKEN.
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
@@ -82,7 +85,11 @@ jobs:
           steps.fmt_check_final.outputs.status == '0' &&
           github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Optional fine-grained/classic PAT with repo + pull-requests (if org blocks token PR creation).
+          GH_TOKEN: ${{ secrets.ACTIONS_PR_CREATE_TOKEN || github.token }}
+          # After opening the heal PR, squash-merge into BASE_BRANCH so engineers do not merge by hand.
+          # Set repository variable AUTO_MERGE_HEAL_PR to false to disable. If merge fails (branch rules), merge the PR from the UI.
+          AUTO_MERGE_HEAL_PR: ${{ vars.AUTO_MERGE_HEAL_PR != '' && vars.AUTO_MERGE_HEAL_PR || 'true' }}
           BASE_BRANCH: ${{ github.ref_name }}
           HEAL_BRANCH: terraform-fmt-auto-heal/run-${{ github.run_id }}-${{ github.run_attempt }}
           COMMIT_MSG: '[AUTO-HEAL] Fix Terraform formatting'
