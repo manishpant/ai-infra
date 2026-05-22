@@ -95,7 +95,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
 
 # Bucket policy (deny unencrypted uploads)
 resource "          aws_s3_bucket_policy" "main" {
-  bucket = aws_s3_bucket.main.id
+                bucket = aws_s3_bucket.main.id
 
   policy = jsonencode({
     Version = "2012-10-17"
